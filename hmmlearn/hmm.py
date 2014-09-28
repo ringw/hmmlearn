@@ -25,7 +25,8 @@ from .utils.fixes import log_multivariate_normal_density
 
 from . import _hmmc
 
-__all__ = ['GMMHMM',
+__all__ = ['BernoulliHMM',
+           'GMMHMM',
            'GaussianHMM',
            'MultinomialHMM',
            'decoder_algorithms',
@@ -1264,3 +1265,174 @@ class GMMHMM(_BaseHMM):
                         g.covars_ = ((stats['covars'][state]
                                      + self.covars_prior * eye[np.newaxis])
                                      / cvnorm)
+
+class BernoulliHMM(_BaseHMM):
+    """Hidden Markov Model with a vector of independent Bernoulli (binary) emissions
+
+    Attributes
+    ----------
+    n_components : int
+        Number of states in the model.
+
+    n_outputs : int
+        Number of variables in the output vector
+
+    transmat : array, shape (`n_components`, `n_components`)
+        Matrix of transition probabilities between states.
+
+    startprob : array, shape ('n_components`,)
+        Initial state occupation distribution.
+
+    emissionprob : array, shape ('n_components`, 'n_outputs`)
+        Probability of emitting a 1 for each variable in each state.
+
+    random_state: RandomState or an int seed (0 by default)
+        A random number generator instance
+
+    n_iter : int, optional
+        Number of iterations to perform.
+
+    thresh : float, optional
+        Convergence threshold.
+
+    params : string, optional
+        Controls which parameters are updated in the training
+        process.  Can contain any combination of 's' for startprob,
+        't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    init_params : string, optional
+        Controls which parameters are initialized prior to
+        training.  Can contain any combination of 's' for
+        startprob, 't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    Examples
+    --------
+    >>> from hmmlearn.hmm import BernoulliHMM
+    >>> BernoulliHMM(n_components=2)
+    ...                             #doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+    BernoulliHMM(algorithm='viterbi',...
+
+    See Also
+    --------
+    GaussianHMM : HMM with Gaussian emissions
+    """
+
+    def __init__(self, n_components=1, startprob=None, transmat=None,
+                 startprob_prior=None, transmat_prior=None,
+                 algorithm="viterbi", random_state=None,
+                 n_iter=10, thresh=1e-2, params=string.ascii_letters,
+                 init_params=string.ascii_letters):
+        """Create a hidden Markov model with Bernoulli emissions.
+
+        Parameters
+        ----------
+        n_components : int
+            Number of states.
+        """
+        _BaseHMM.__init__(self, n_components, startprob, transmat,
+                          startprob_prior=startprob_prior,
+                          transmat_prior=transmat_prior,
+                          algorithm=algorithm,
+                          random_state=random_state,
+                          n_iter=n_iter,
+                          thresh=thresh,
+                          params=params,
+                          init_params=init_params)
+
+    def _get_emissionprob(self):
+        """Emission probability distribution for each state."""
+        return np.exp(self._log_emissionprob)
+
+    def _set_emissionprob(self, emissionprob):
+        emissionprob = np.asarray(emissionprob)
+        if hasattr(self, 'n_outputs') and \
+                emissionprob.shape != (self.n_components, self.n_outputs):
+            raise ValueError('emissionprob must have shape '
+                             '(n_components, n_outputs)')
+
+        # check if there exists a component whose value is exactly zero
+        # if so, add a small number
+        if not np.alltrue(emissionprob):
+            emissionprob += EPS
+
+        self._log_emissionprob = np.log(emissionprob)
+        underflow_idx = np.isnan(self._log_emissionprob)
+        self._log_emissionprob[underflow_idx] = NEGINF
+        self.n_outputs = self._log_emissionprob.shape[1]
+
+    emissionprob_ = property(_get_emissionprob, _set_emissionprob)
+
+    def _compute_log_likelihood(self, obs):
+        prob = self._log_emissionprob[:, np.newaxis, :].repeat(len(obs), 1)
+        zero_obs = (~obs)[np.newaxis, :, :].repeat(prob.shape[0], 0)
+        for o, ob in enumerate(obs):
+            is_zero = ob == 0
+            prob[:, o, is_zero] = np.log(1 - np.exp(prob[:, o, is_zero]))
+        return prob.sum(axis=2).T
+
+    def _generate_sample_from_state(self, state, random_state=None):
+        random_state = check_random_state(random_state)
+        rand = random_state.rand()
+        return random_state.rand(self.n_outputs) < self.emissionprob_[state, :]
+
+    def _init(self, obs, params='ste'):
+        super(BernoulliHMM, self)._init(obs, params=params)
+        self.random_state = check_random_state(self.random_state)
+
+        if 'e' in params:
+            if not hasattr(self, 'n_outputs'):
+                self.n_outputs = obs[0].shape[1]
+            emissionprob = normalize(self.random_state.rand(self.n_components,
+                                                            self.n_outputs), 1)
+            self.emissionprob_ = emissionprob
+
+    def _initialize_sufficient_statistics(self):
+        stats = super(BernoulliHMM, self)._initialize_sufficient_statistics()
+        stats['obs'] = np.zeros((self.n_components, self.n_outputs, 2))
+        return stats
+
+    def _accumulate_sufficient_statistics(self, stats, obs, framelogprob,
+                                          posteriors, fwdlattice, bwdlattice,
+                                          params):
+        super(BernoulliHMM, self)._accumulate_sufficient_statistics(
+            stats, obs, framelogprob, posteriors, fwdlattice, bwdlattice,
+            params)
+        if 'e' in params:
+            for t, outputs in enumerate(obs):
+                for o, output in enumerate(outputs):
+                    stats['obs'][:, o, output.astype(int)] += posteriors[t]
+
+    def _do_mstep(self, stats, params):
+        super(BernoulliHMM, self)._do_mstep(stats, params)
+        if 'e' in params:
+            self.emissionprob_ = (stats['obs'][:, :, 1] / stats['obs'].sum(2))
+
+    def _check_input_outputs(self, obs):
+        """ Observations must each be a 2D boolean array """
+
+        for obs_seq in obs:
+            return obs_seq.dtype.kind == 'b' and len(obs_seq.shape) == 2
+
+    def fit(self, obs, **kwargs):
+        """Estimate model parameters.
+
+        An initialization step is performed before entering the EM
+        algorithm. If you want to avoid this step, pass proper
+        ``init_params`` keyword argument to estimator's constructor.
+
+        Parameters
+        ----------
+        obs : list
+            List of array-like observation sequences, each of which
+            has shape (n_i, n_outputs), where n_i is the length of
+            the i_th observation.
+        """
+        err_msg = ("Input must be a 2-dimensional boolean array,"
+                   "but %s was given.")
+
+        if not self._check_input_outputs(obs):
+            raise ValueError(err_msg % obs)
+
+        return _BaseHMM.fit(self, obs, **kwargs)

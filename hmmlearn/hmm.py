@@ -249,7 +249,7 @@ class _BaseHMM(BaseEstimator):
 
         score : Compute the log probability under the model
         """
-        obs = np.asarray(obs)
+        #obs = np.asarray(obs)
         framelogprob = self._compute_log_likelihood(obs)
         viterbi_logprob, state_sequence = self._do_viterbi_pass(framelogprob)
         return viterbi_logprob, state_sequence
@@ -1439,7 +1439,8 @@ class BernoulliHMM(_BaseHMM):
         return _BaseHMM.fit(self, obs, **kwargs)
 
 class BernoulliMultiHMM(_BaseHMM):
-    """Hidden Markov Model with independent binary outputs plus one multinomial
+    """Hidden Markov Model with independent binary outputs plus one multinomial.
+    Missing multinomial outputs should be set to -1.
 
     Attributes
     ----------
@@ -1557,56 +1558,82 @@ class BernoulliMultiHMM(_BaseHMM):
 
     def _compute_log_likelihood(self, obs):
         bern, multi = obs
+        bern = np.asarray(bern)
+        multi = np.asarray(multi)
         assert len(bern) == len(multi)
-        prob = self._log_emissionprob[:, np.newaxis, :].repeat(len(bern), 1)
+        prob = self._log_bernoulliprob[:, np.newaxis, :].repeat(len(bern), 1)
         zero_obs = (~bern)[np.newaxis, :, :].repeat(prob.shape[0], 0)
-        for o, ob in enumerate(obs):
+        for o, ob in enumerate(bern):
             is_zero = ob == 0
             prob[:, o, is_zero] = np.log(1 - np.exp(prob[:, o, is_zero]))
-        return prob.sum(axis=2).T
+        prob = prob.sum(axis=2).T
+
+        multi_observed = multi >= 0
+        multi_prob = self._log_multinomprob[:, multi[multi_observed]].T
+        prob[multi_observed, :] += multi_prob
+        return prob
 
     def _generate_sample_from_state(self, state, random_state=None):
         random_state = check_random_state(random_state)
         rand = random_state.rand()
-        return random_state.rand(self.n_outputs) < self.emissionprob_[state, :]
+        multi_cdf = np.cumsum(self.multinomprob_[state, :])
+        multi_rand = random_state.rand()
+        return (random_state.rand(self.n_outputs) < self.emissionprob_[state,:],
+                (multi_cdf > multi_rand).argmax())
 
     def _init(self, obs, params='ste'):
-        super(BernoulliHMM, self)._init(obs, params=params)
+        super(BernoulliMultiHMM, self)._init(obs, params=params)
         self.random_state = check_random_state(self.random_state)
 
         if 'e' in params:
             if not hasattr(self, 'n_outputs'):
-                self.n_outputs = obs[0].shape[1]
-            emissionprob = normalize(self.random_state.rand(self.n_components,
-                                                            self.n_outputs), 1)
-            self.emissionprob_ = emissionprob
+                self.n_outputs = obs[0][0].shape[1]
+            if not hasattr(self, 'n_symbols'):
+                self.n_symbols = max([sym for b,m in obs for sym in m]) + 1
+            bernoulliprob = normalize(self.random_state.rand(self.n_components,
+                                                             self.n_outputs), 1)
+            multinomprob = normalize(self.random_state.rand(self.n_components,
+                                                            self.n_symbols), 1)
+            self.emissionprob_ = (bernoulliprob, multinomprob)
 
     def _initialize_sufficient_statistics(self):
-        stats = super(BernoulliHMM, self)._initialize_sufficient_statistics()
-        stats['obs'] = np.zeros((self.n_components, self.n_outputs, 2))
+        stats = super(BernoulliMultiHMM, self)._initialize_sufficient_statistics()
+        stats['bobs'] = np.zeros((self.n_components, self.n_outputs, 2))
+        stats['mobs'] = np.zeros((self.n_components, self.n_symbols))
         return stats
 
     def _accumulate_sufficient_statistics(self, stats, obs, framelogprob,
                                           posteriors, fwdlattice, bwdlattice,
                                           params):
-        super(BernoulliHMM, self)._accumulate_sufficient_statistics(
+        super(BernoulliMultiHMM, self)._accumulate_sufficient_statistics(
             stats, obs, framelogprob, posteriors, fwdlattice, bwdlattice,
             params)
         if 'e' in params:
-            for t, outputs in enumerate(obs):
+            bern, multi = obs
+            for t, (outputs, symbol) in enumerate(zip(bern, multi)):
                 for o, output in enumerate(outputs):
-                    stats['obs'][:, o, output.astype(int)] += posteriors[t]
+                    stats['bobs'][:, o, output.astype(int)] += posteriors[t]
+                stats['mobs'][:, symbol] += posteriors[t]
 
     def _do_mstep(self, stats, params):
-        super(BernoulliHMM, self)._do_mstep(stats, params)
+        super(BernoulliMultiHMM, self)._do_mstep(stats, params)
         if 'e' in params:
-            self.emissionprob_ = (stats['obs'][:, :, 1] / stats['obs'].sum(2))
+            self.bernoulliprob_ = (stats['bobs'][:, :, 1]/stats['bobs'].sum(2))
+            self.multinomprob_ = (stats['mobs']
+                                  / stats['mobs'].sum(1)[:, np.newaxis])
 
     def _check_input_outputs(self, obs):
         """ Observations must each be a 2D boolean array """
 
-        for obs_seq in obs:
-            return obs_seq.dtype.kind == 'b' and len(obs_seq.shape) == 2
+        for bern, multi in obs:
+            if not (bern.dtype.kind == 'b' and len(bern.shape) == 2):
+                return False
+            multi = np.asarray(multi).flatten()
+            multi.sort()
+            if (len(multi) == 1 or len(multi) != len(bern)
+                or np.all(multi < 0) or np.any(np.diff(multi) > 1)):
+                return False
+        return True
 
     def fit(self, obs, **kwargs):
         """Estimate model parameters.
@@ -1622,7 +1649,8 @@ class BernoulliMultiHMM(_BaseHMM):
             has shape (n_i, n_outputs), where n_i is the length of
             the i_th observation.
         """
-        err_msg = ("Input must be a 2-dimensional boolean array,"
+        err_msg = ("Input must be a tuple of a 2-dimensional boolean array and "
+                   "array of contiguous integers or -1, "
                    "but %s was given.")
 
         if not self._check_input_outputs(obs):

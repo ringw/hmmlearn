@@ -23,6 +23,11 @@ from sklearn import cluster
 
 from .utils.fixes import log_multivariate_normal_density
 
+import copy
+import cPickle
+import multiprocessing
+import sys
+
 from . import _hmmc
 
 __all__ = ['BernoulliHMM',
@@ -68,6 +73,35 @@ def normalize(A, axis=None):
         shape[axis] = 1
         Asum.shape = shape
     return A / Asum
+
+
+def hmm_from_dict(class_name, our_params):
+    ourmod = sys.modules[__name__]
+    new_obj = getattr(ourmod, class_name)()
+    for param in our_params:
+        setattr(new_obj, param, our_params[param])
+    return new_obj
+
+def _get_partial_statistics(args):
+    try:
+        ourhmm, seq = args
+        # Need a new random seed
+        ourhmm.random_state = np.random.RandomState()
+        stats = ourhmm._initialize_sufficient_statistics()
+        framelogprob = ourhmm._compute_log_likelihood(seq)
+        lpr, fwdlattice = ourhmm._do_forward_pass(framelogprob)
+        bwdlattice = ourhmm._do_backward_pass(framelogprob)
+        gamma = fwdlattice + bwdlattice
+        posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
+        ourhmm._accumulate_sufficient_statistics(
+            stats, seq, framelogprob, posteriors, fwdlattice,
+            bwdlattice, ourhmm.params)
+        return lpr, stats
+    except Exception as e:
+        import traceback
+        print 'CHILD ERROR'
+        traceback.print_exc()
+        print 'END CHILD ERROR'
 
 
 class _BaseHMM(BaseEstimator):
@@ -139,6 +173,8 @@ class _BaseHMM(BaseEstimator):
     # Subclasses will probably also want to implement properties for
     # the emission distribution parameters to expose them publicly.
 
+    CLASS_PARAMS = """n_components params startprob_ startprob_prior
+                      transmat_ transmat_prior""".split()
     def __init__(self, n_components=1, startprob=None, transmat=None,
                  startprob_prior=None, transmat_prior=None,
                  algorithm="viterbi", random_state=None,
@@ -397,6 +433,13 @@ class _BaseHMM(BaseEstimator):
 
         return np.array(obs), np.array(hidden_states, dtype=int)
 
+    # Need to be able to pickle ourselves for multiprocessing to work
+    def __reduce__(self):
+        our_params = dict()
+        for param in self.CLASS_PARAMS:
+            our_params[param] = getattr(self, param)
+        return (hmm_from_dict, (self.__class__.__name__, our_params))
+
     def fit(self, obs):
         """Estimate model parameters.
 
@@ -426,21 +469,21 @@ class _BaseHMM(BaseEstimator):
 
         self._init(obs, self.init_params)
 
+        if not hasattr(self, 'pool'):
+            self.pool = multiprocessing.Pool()
+
         logprob = []
         for i in range(self.n_iter):
             # Expectation step
             stats = self._initialize_sufficient_statistics()
             curr_logprob = 0
-            for seq in obs:
-                framelogprob = self._compute_log_likelihood(seq)
-                lpr, fwdlattice = self._do_forward_pass(framelogprob)
-                bwdlattice = self._do_backward_pass(framelogprob)
-                gamma = fwdlattice + bwdlattice
-                posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
+
+            results = self.pool.map(_get_partial_statistics,
+                [(self, ob) for ob in obs])
+            for lpr, seqstats in results:
                 curr_logprob += lpr
-                self._accumulate_sufficient_statistics(
-                    stats, seq, framelogprob, posteriors, fwdlattice,
-                    bwdlattice, self.params)
+                for key in stats:
+                    stats[key] += seqstats[key]
             logprob.append(curr_logprob)
 
             # Check for convergence.
@@ -1497,6 +1540,10 @@ class BernoulliMultiHMM(_BaseHMM):
     --------
     GaussianHMM : HMM with Gaussian emissions
     """
+
+    CLASS_PARAMS = _BaseHMM.CLASS_PARAMS + """
+        n_outputs n_symbols _log_bernoulliprob _log_multinomprob
+    """.split()
 
     def __init__(self, n_components=1, startprob=None, transmat=None,
                  startprob_prior=None, transmat_prior=None,

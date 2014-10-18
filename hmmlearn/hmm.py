@@ -1363,6 +1363,8 @@ class BernoulliHMM(_BaseHMM):
     GaussianHMM : HMM with Gaussian emissions
     """
 
+    CLASS_PARAMS = _BaseHMM.CLASS_PARAMS + "n_outputs _log_emissionprob".split()
+
     def __init__(self, n_components=1, startprob=None, transmat=None,
                  startprob_prior=None, transmat_prior=None,
                  algorithm="viterbi", random_state=None,

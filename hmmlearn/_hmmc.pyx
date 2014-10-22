@@ -30,6 +30,26 @@ cpdef dtype_t _logsum(dtype_t[:] X):
 
     return log(power_sum) + vmax
 
+@cython.boundscheck(False)
+cpdef _logsum_axis(arr, axis=0):
+    real_ndim = len(arr.shape)
+    cdef np.ndarray[dtype_t, ndim=3] a = np.rollaxis(np.atleast_3d(arr), axis)
+    cdef np.ndarray[dtype_t, ndim=2] b = np.zeros((a.shape[1], a.shape[2]),
+                                                  a.dtype)
+    cdef int x, y, z
+    cdef int len_x = a.shape[0]
+    cdef int len_y = a.shape[1]
+    cdef int len_z = a.shape[2]
+    cdef np.ndarray[dtype_t, ndim=2] x_temp = np.zeros_like(b)
+    cdef dtype_t x_max = a.max()
+    for x in xrange(len_x):
+        x_temp[:] = a[x]
+        x_temp[:] -= x_max
+        np.exp(x_temp, output=x_temp)
+        b[:] += x_temp
+    np.log(b, output=b)
+    b += x_max
+    return b
 
 @cython.boundscheck(False)
 def _forward(int n_observations, int n_components,

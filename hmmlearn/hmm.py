@@ -92,7 +92,7 @@ def _get_partial_statistics(args):
         lpr, fwdlattice = ourhmm._do_forward_pass(framelogprob)
         bwdlattice = ourhmm._do_backward_pass(framelogprob)
         gamma = fwdlattice + bwdlattice
-        posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
+        posteriors = np.exp(gamma.T - _hmmc._logsum_axis(gamma, axis=1)).T
         ourhmm._accumulate_sufficient_statistics(
             stats, seq, framelogprob, posteriors, fwdlattice,
             bwdlattice, ourhmm.params)

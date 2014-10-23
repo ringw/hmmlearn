@@ -112,6 +112,25 @@ def _compute_lneta(int n_observations, int n_components,
                 lneta[t, i, j] = fwdlattice[t, i] + log_transmat[i, j] \
                     + framelogprob[t + 1, j] + bwdlattice[t + 1, j] - logprob
 
+@cython.boundscheck(False)
+def _accum_trans_stats(int n_observations, int n_components,
+        np.ndarray[dtype_t, ndim=2] fwdlattice,
+        np.ndarray[dtype_t, ndim=2] log_transmat,
+        np.ndarray[dtype_t, ndim=2] bwdlattice,
+        np.ndarray[dtype_t, ndim=2] framelogprob,
+        double logprob,
+        np.ndarray[dtype_t, ndim=2] trans_stats):
+    """ Update transition statistics in one step. """
+    cdef int i, j, t
+    cdef dtype_t sumexp_lneta, cur_lneta
+    for i in range(trans_stats.shape[0]):
+        for j in range(trans_stats.shape[1]):
+            sumexp_lneta = 0
+            for t in range(n_observations - 1):
+                cur_lneta = fwdlattice[t, i] + log_transmat[i, j] \
+                        + framelogprob[t+1, j] + bwdlattice[t+1, j] - logprob
+                sumexp_lneta += exp(cur_lneta)
+            trans_stats[i, j] += min(sumexp_lneta, exp(700.0))
 
 @cython.boundscheck(False)
 def _viterbi(int n_observations, int n_components,

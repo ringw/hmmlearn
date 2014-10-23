@@ -92,7 +92,7 @@ def _get_partial_statistics(args):
         lpr, fwdlattice = ourhmm._do_forward_pass(framelogprob)
         bwdlattice = ourhmm._do_backward_pass(framelogprob)
         gamma = fwdlattice + bwdlattice
-        posteriors = np.exp(gamma.T - _hmmc._logsum_axis(gamma, axis=1)).T
+        posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
         ourhmm._accumulate_sufficient_statistics(
             stats, seq, framelogprob, posteriors, fwdlattice,
             bwdlattice, ourhmm.params)
@@ -614,12 +614,11 @@ class _BaseHMM(BaseEstimator):
             # when the sample is of length 1, it contains no transitions
             # so there is no reason to update our trans. matrix estimate
             if n_observations > 1:
-                lneta = np.zeros((n_observations - 1, n_components, n_components))
                 lnP = logsumexp(fwdlattice[-1])
-                _hmmc._compute_lneta(n_observations, n_components, fwdlattice,
-                                     self._log_transmat, bwdlattice, framelogprob,
-                                     lnP, lneta)
-                stats['trans'] += np.exp(np.minimum(logsumexp(lneta, 0), 700))
+                _hmmc._accum_trans_stats(n_observations, n_components,
+                                         fwdlattice, self._log_transmat,
+                                         bwdlattice, framelogprob,
+                                         lnP, stats['trans'])
 
     def _do_mstep(self, stats, params):
         # Based on Huang, Acero, Hon, "Spoken Language Processing",
